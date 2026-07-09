@@ -17,7 +17,7 @@ const cron = require("node-cron");
 // Prefer environment variable for URI; fall back to the existing literal (kept for compatibility)
 const mongoURI =
   process.env.MONGODB_URI ||
-  "mongodb+srv://Stacks2:Mark075555@stacks.surpuwe.mongodb.net/Stacks?retryWrites=true&w=majority&appName=Stacks";
+  "mongodb+srv://LumoStra:Mark0755@lumostra.5hchanm.mongodb.net/Stacks?retryWrites=true&w=majority&appName=LumoStra";
 
 // Optional explicit DB name via env (if you prefer not to include DB in URI)
 const dbName = process.env.MONGODB_DB || undefined;
@@ -74,7 +74,7 @@ app.use(
       "https://stacksapp.pages.dev",
       "http://localhost:5173",
       "https://stacks-48in.onrender.com",
-      "https://stacksl.netlify.app",
+      "https://lumostra.onrender.com/",
     ],
     credentials: true,
     allowedHeaders: [
