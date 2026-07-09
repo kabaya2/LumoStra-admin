@@ -74,7 +74,7 @@ app.use(
       "https://stacksapp.pages.dev",
       "http://localhost:5173",
       "https://stacks-48in.onrender.com",
-      "https://lumostra.onrender.com/",
+      "https://lumostra.onrender.com",
     ],
     credentials: true,
     allowedHeaders: [
