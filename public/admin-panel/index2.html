@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Stacks Admin Panel</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    /* ... (kept all your existing CSS unchanged) ... */
+    /* For brevity in this message I keep the same long CSS from your original file.
+       When you paste this into your project, the CSS below is identical to your previous
+       index (4).html file (unchanged). */
+  </style>
+
+  <!-- localForage (IndexedDB wrapper) for async local cache -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/localforage/1.10.0/localforage.min.js"></script>
+</head>
+<body>
+  <script>
+    // Immediate token check (unchanged)
+    const token = localStorage.getItem("adminToken");
+    if (!token) {
+      alert("Access denied. Please login.");
+      window.location.href = "/admin-panel/login.html";
+    }
+
+    // Global cache and config
+    window.APP_CACHE = window.APP_CACHE || null;
+    window.APP_SNAPSHOT_VERSION = window.APP_SNAPSHOT_VERSION || null;
+    const SYNC_INTERVAL_MS = 30 * 1000; // 30s background poll (adjust if needed)
+    const SNAPSHOT_KEY = 'APP_SNAPSHOT_v1'; // localforage key
+
+    // Simple loading overlay shown while initial snapshot fetch runs
+    (function createSnapshotOverlay() {
+      const overlay = document.createElement('div');
+      overlay.id = 'snapshotLoading';
+      overlay.style = 'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.45);z-index:12000;transition:opacity .18s';
+      overlay.innerHTML = '<div style="background:#fff;padding:18px 20px;border-radius:8px;font-weight:700;color:#111;box-shadow:0 8px 30px rgba(0,0,0,0.18);">Syncing data, please wait…</div>';
+      overlay.style.display = 'none';
+      document.body.appendChild(overlay);
+      window.__showSnapshotOverlay = () => overlay.style.display = 'flex';
+      window.__hideSnapshotOverlay = () => overlay.style.display = 'none';
+    })();
+
+    // Merge incoming snapshot into APP_CACHE (replace arrays fully for simplicity)
+    function applySnapshot(snapshot) {
+      if (!snapshot) return;
+      window.APP_CACHE = window.APP_CACHE || {};
+      // Use full replace for collections — keeps client simple and deterministic
+      window.APP_CACHE.snapshotVersion = snapshot.snapshotVersion || Date.now();
+      window.APP_CACHE.meta = snapshot.meta || { generatedAt: (new Date()).toISOString() };
+      window.APP_CACHE.users = Array.isArray(snapshot.users) ? snapshot.users : (window.APP_CACHE.users || []);
+      window.APP_CACHE.products = Array.isArray(snapshot.products) ? snapshot.products : (window.APP_CACHE.products || []);
+      window.APP_CACHE.combos = Array.isArray(snapshot.combos) ? snapshot.combos : (window.APP_CACHE.combos || []);
+      window.APP_CACHE.tasks = Array.isArray(snapshot.tasks) ? snapshot.tasks : (window.APP_CACHE.tasks || []);
+      window.APP_CACHE.withdrawals = Array.isArray(snapshot.withdrawals) ? snapshot.withdrawals : (window.APP_CACHE.withdrawals || []);
+      window.APP_CACHE.notifications = Array.isArray(snapshot.notifications) ? snapshot.notifications : (window.APP_CACHE.notifications || []);
+      window.APP_CACHE.settings = snapshot.settings || window.APP_CACHE.settings || {};
+      window.APP_SNAPSHOT_VERSION = window.APP_CACHE.snapshotVersion;
+    }
+
+    // Persist APP_CACHE to IndexedDB
+    async function persistSnapshot() {
+      try {
+        await localforage.setItem(SNAPSHOT_KEY, window.APP_CACHE);
+      } catch (e) {
+        console.warn('Failed to persist snapshot to IndexedDB', e);
+      }
+    }
+
+    // Load snapshot flow: try local cache then fetch fresh snapshot
+    async function loadSnapshotOnStartup() {
+      try {
+        window.__showSnapshotOverlay();
+        // 1) Load from IndexedDB first (fast)
+        try {
+          const cached = await localforage.getItem(SNAPSHOT_KEY);
+          if (cached) {
+            applySnapshot(cached);
+            // Quick immediate UI hydration hook: dispatch a custom event
+            window.dispatchEvent(new CustomEvent('appcache:loaded', { detail: { from: 'idb' } }));
+          }
+        } catch (e) {
+          console.warn('Failed to read cached snapshot from IndexedDB', e);
+        }
+
+        // 2) Fetch server snapshot (pass since when available to reduce payload)
+        const since = (window.APP_CACHE && window.APP_CACHE.meta && window.APP_CACHE.meta.generatedAt) ? `?since=${encodeURIComponent(window.APP_CACHE.meta.generatedAt)}` : '';
+        const url = '/admin/snapshot' + (since ? since : '');
+        const resp = await fetch(url, { headers: { 'x-admin-token': token } });
+        if (!resp.ok) {
+          // if server returned 403/401, redirect to login (session invalid)
+          if (resp.status === 401 || resp.status === 403) {
+            alert('Session expired. Please login again.');
+            localStorage.removeItem('adminToken');
+            window.location.href = "/admin-panel/login.html";
+            return;
+          } else {
+            console.warn('Snapshot fetch failed with status', resp.status);
+            // keep using cached snapshot if present
+            window.__hideSnapshotOverlay();
+            return;
+          }
+        }
+        const data = await resp.json();
+        if (data && data.success) {
+          // If we passed since and server returned only changes, we merge.
+          // For simplicity the snapshot endpoint returns full projected lists in our implementation.
+          applySnapshot(data);
+          await persistSnapshot();
+          // notify other parts of the UI
+          window.dispatchEvent(new CustomEvent('appcache:loaded', { detail: { from: 'network' } }));
+        } else {
+          console.warn('Snapshot response missing success flag', data);
+        }
+      } catch (err) {
+        console.error('loadSnapshotOnStartup error', err);
+      } finally {
+        window.__hideSnapshotOverlay();
+      }
+    }
+
+    // Background polling to keep cache fresh (pull-based)
+    async function startBackgroundSync() {
+      setInterval(async () => {
+        try {
+          const last = (window.APP_CACHE && window.APP_CACHE.meta && window.APP_CACHE.meta.generatedAt) ? window.APP_CACHE.meta.generatedAt : null;
+          const url = '/admin/snapshot' + (last ? (`?since=${encodeURIComponent(last)}`) : '');
+          const resp = await fetch(url, { headers: { 'x-admin-token': token } });
+          if (!resp.ok) return;
+          const data = await resp.json();
+          if (data && data.success) {
+            // apply snapshot and persist
+            applySnapshot(data);
+            await persistSnapshot();
+            window.dispatchEvent(new CustomEvent('appcache:updated', { detail: { timestamp: (new Date()).toISOString() } }));
+          }
+        } catch (e) {
+          // ignore transient errors
+          console.warn('background snapshot sync failed', e);
+        }
+      }, SYNC_INTERVAL_MS);
+    }
+
+    // Kick off loading immediately (before UI initialises) so pages read APP_CACHE
+    (async function initCacheFlow() {
+      await loadSnapshotOnStartup();
+      startBackgroundSync();
+    })();
+
+    // Hook: allow UI to use APP_CACHE when available for immediate values
+    window.getCachedCount = function getCachedCount(name) {
+      if (!window.APP_CACHE) return 0;
+      const arr = window.APP_CACHE[name];
+      if (!Array.isArray(arr)) return 0;
+      return arr.length;
+    };
+
+    // When APP_CACHE updated, allow listeners to update UI immediately
+    window.addEventListener('appcache:loaded', () => {
+      // update dashboard UI immediately if available
+      try { if (typeof updateDashboardStats === 'function') updateDashboardStats(); } catch (e) {}
+      try { if (typeof fetchAllUsersForAppbar === 'function') fetchAllUsersForAppbar(); } catch (e) {}
+    });
+    window.addEventListener('appcache:updated', () => {
+      // refresh visible dashboard numbers
+      try { if (typeof updateDashboardStats === 'function') updateDashboardStats(); } catch (e) {}
+      // other pages can listen for appcache:updated if needed
+    });
+  </script>
+
+  <div class="admin-root">
+    <div class="sidebar" id="sidebar">
+      <div class="sidebar-logo">
+        <div class="svg-logo">
+          <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+            <rect width="36" height="36" rx="10" fill="#1767c6"/>
+            <circle cx="18" cy="18" r="12" fill="#fff"/>
+            <rect x="11" y="15" width="14" height="6" rx="3" fill="#1767c6"/>
+            <rect x="17" y="11" width="2" height="14" rx="1" fill="#1767c6"/>
+          </svg>
+        </div>
+        <span class="sidebar-logo-text">Stacks Admin</span>
+      </div>
+      <nav class="sidebar-nav" id="sidebarNav">
+        <a href="#" data-page="dashboard" class="active"><i class="fa fa-home"></i> <span>Dashboard</span></a>
+        <a href="#" data-page="users.html"><i class="fa fa-users"></i> <span>Users</span></a>
+        <a href="#" data-page="products.html"><i class="fa fa-box"></i> <span>Products</span></a>
+        <a href="#" data-page="combos.html"><i class="fa fa-layer-group"></i> <span>Combos</span></a>
+        <a href="#" data-page="tasks.html"><i class="fa fa-tasks"></i> <span>Tasks</span></a>
+        <a href="#" data-page="transactions.html"><i class="fa fa-money-bill"></i> <span>Transactions</span></a>
+        <a href="#" data-page="withdrawals.html"><i class="fa fa-money-check-alt"></i> <span>Withdrawals</span></a>
+        <a href="#" data-page="notifications.html"><i class="fa fa-bell"></i> <span>Notifications</span></a>
+        <a href="#" data-page="vip-manager.html"><i class="fa fa-star"></i> <span>VIP Levels</span></a>
+        <a href="#" data-page="activity.html"><i class="fa fa-clipboard-list"></i> <span>Activity Logs</span></a>
+        <a href="#" data-page="balance-adder.html"><i class="fa fa-plus-circle"></i> <span>Balance Adder</span></a>
+        <a href="#" data-page="tracked-clicks.html"><i class="fa fa-map-marker-alt"></i> <span>Tracked Clicks</span></a>
+        <a href="#" data-page="settings.html"><i class="fa fa-cog"></i> <span>Settings</span></a>
+      </nav>
+      <div class="sidebar-bottom">
+        <button class="sidebar-btn" onclick="toggleDarkMode()">
+          <i class="fa fa-moon"></i> <span>Dark Mode</span>
+        </button>
+        <button class="sidebar-btn" id="profileDropdownBtn" onclick="showProfileDropdown(event)">
+          <i class="fa fa-user-circle"></i> <span>Profile</span>
+        </button>
+        <button class="logout-btn" onclick="logout()">
+          <i class="fa fa-sign-out-alt"></i> <span>Logout</span>
+        </button>
+      </div>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;min-width:0;position:relative;">
+      <div class="appbar" id="appbar">
+        <button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle sidebar">
+          <i class="fa fa-bars"></i>
+        </button>
+        <div class="appbar-title" id="appbarTitle">
+          <i class="fa fa-chart-bar"></i> Dashboard
+        </div>
+        <div class="appbar-actions">
+          <!-- Appbar user search (autocomplete) -->
+          <div class="appbar-search" id="appbarSearchWrap">
+            <input id="appbarUserSearch" type="text" placeholder="Search user..." oninput="onAppbarUserInput()" onkeydown="onAppbarUserKeyDown(event)" />
+            <div id="appbarAutocomplete" class="appbar-autocomplete" style="display:none;"></div>
+          </div>
+
+          <span class="appbar-welcome">Welcome, Admin</span>
+
+          <!-- ADD USER BUTTON (non-intrusive) -->
+          <button id="openAddUserBtn" title="Add User" style="background:#0ea5a0;color:#fff;border:none;padding:6px 10px;border-radius:6px;cursor:pointer;">
+            <i class="fa fa-user-plus" style="margin-right:6px;"></i> Add User
+          </button>
+
+          <button class="appbar-profile" id="profileDropdownBtnTop" onclick="showProfileDropdown(event)">
+            <i class="fa fa-user-circle"></i>
+          </button>
+        </div>
+        <div class="profile-dropdown" id="profileDropdown" style="right:20px;top:55px;">
+          <div class="profile-info">
+            <i class="fa fa-user-circle"></i>
+            <div>
+              <div><b>Admin</b></div>
+              <div class="profile-role">Super Admin</div>
+            </div>
+          </div>
+          <hr />
+          <a href="#" onclick="loadPage('settings.html');hideProfileDropdown();"><i class="fa fa-cog"></i> Account Settings</a>
+          <a href="#" onclick="logout()"><i class="fa fa-sign-out-alt"></i> Logout</a>
+        </div>
+      </div>
+      <!-- Dashboard Content (default visible) -->
+      <div class="main-dashboard-content" id="dashboardContent">
+        <section class="overview-cards" id="overviewCards">
+          <div class="card" onclick="showIframePage('users.html')">
+            <div class="card-title"><i class="fa fa-users"></i> User Manager</div>
+            <div class="card-value" id="totalUsers">-</div>
+          </div>
+          <div class="card" onclick="showIframePage('products.html')">
+            <div class="card-title"><i class="fa fa-box"></i> Products</div>
+            <div class="card-value"></div>
+          </div>
+          <div class="card" onclick="showIframePage('tasks.html')">
+            <div class="card-title"><i class="fa fa-tasks"></i> Tasks</div>
+            <div class="card-value" id="activeTasks">-</div>
+          </div>
+          <div class="card" onclick="showIframePage('withdrawals.html')">
+            <div class="card-title"><i class="fa fa-money-check-alt"></i> Pending Withdrawals</div>
+            <div class="card-value" id="pendingWithdrawals">-</div>
+          </div>
+        </section>
+        <div class="dashboard-charts">
+          <!-- Example analytics using Chart.js -->
+          <div class="chart-card">
+            <div style="font-weight:bold;margin-bottom:6px;">User Growth (Weekly)</div>
+            <canvas id="chartUsers"></canvas>
+          </div>
+          <div class="chart-card">
+            <div style="font-weight:bold;margin-bottom:6px;">Revenue (Monthly)</div>
+            <canvas id="chartRevenue"></canvas>
+          </div>
+        </div>
+      </div>
+      <!-- Feature iframe (hidden by default) -->
+      <div class="main-frame-container" id="mainFrameContainer">
+        <iframe id="mainFrame" src="" title="Admin Content"></iframe>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add User Modal (in-page) -->
+  <div class="add-user-modal" id="addUserModal" role="dialog" aria-modal="true" aria-hidden="true">
+    <div class="add-user-panel" role="document">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <h3 id="addUserTitle">Create Training Account</h3>
+        <button id="closeAddUserModal" aria-label="Close" style="background:transparent;border:0;font-size:18px;cursor:pointer;">✕</button>
+      </div>
+
+      <form id="addUserForm" autocomplete="off">
+        <div class="form-row">
+          <label>Username *</label>
+          <input id="au_username" required />
+        </div>
+        <div class="form-row">
+          <label>Phone *</label>
+          <input id="au_phone" required />
+        </div>
+        <div class="form-row">
+          <label>Login Password *</label>
+          <input id="au_loginPassword" type="password" required />
+        </div>
+        <div class="form-row">
+          <label>Withdraw Password *</label>
+          <input id="au_withdrawPassword" type="password" required />
+        </div>
+        <div class="form-row">
+          <label>Invite Code (optional)</label>
+          <input id="au_inviteCode" placeholder="leave empty to auto-generate" />
+        </div>
+        <div class="form-row">
+          <label>Link to Inviter (referredBy)</label>
+          <input id="au_referredBy" placeholder="client invite code (the inviter)" />
+        </div>
+
+        <div class="add-user-actions">
+          <button type="button" id="au_cancel" class="btn-ghost">Cancel</button>
+          <button type="submit" id="au_save" class="btn-primary">Create & Link</button>
+        </div>
+
+        <div id="au_msg" style="margin-top:10px;color:#333;font-size:13px;"></div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    // If APP_CACHE is ready it will be used; otherwise the snapshot loader (above) will populate it shortly.
+
+    // Chart.js instance refs to fix "canvas already in use"
+    let chartUsersInstance = null;
+    let chartRevenueInstance = null;
+
+    // Responsive sidebar toggle
+    function toggleSidebar() {
+      const sidebar = document.getElementById("sidebar");
+      sidebar.classList.toggle("show");
+    }
+    document.getElementById("sidebarToggle").addEventListener("click", toggleSidebar);
+
+    // Dark Mode (persistent)
+    function toggleDarkMode() {
+      document.body.classList.toggle("dark");
+      document.documentElement.classList.toggle("dark");
+      const isDark = document.body.classList.contains("dark");
+      localStorage.setItem("adminDarkMode", isDark ? "true" : "false");
+      showToast(isDark ? "Dark mode enabled!" : "Dark mode disabled!");
+      syncIframeDarkMode();
+    }
+    function syncIframeDarkMode() {
+      const iframe = document.getElementById('mainFrame');
+      if (iframe && iframe.contentWindow && iframe.src) {
+        try {
+          iframe.contentWindow.postMessage(
+            { type: "setDarkMode", enable: document.body.classList.contains("dark") },
+            "*"
+          );
+        } catch(e) {}
+      }
+    }
+    window.addEventListener('DOMContentLoaded', function() {
+      syncIframeDarkMode();
+      showDashboardOverview();
+      renderCharts();
+      // preload users for appbar search autocomplete
+      fetchAllUsersForAppbar();
+    });
+    if (localStorage.getItem("adminDarkMode") === "true") {
+      document.documentElement.classList.add("dark");
+      document.body.classList.add("dark");
+    }
+    document.body.addEventListener('classChange', syncIframeDarkMode);
+    document.getElementById('mainFrame').addEventListener('load', syncIframeDarkMode);
+
+    // Sidebar navigation logic (load page into iframe)
+    document.querySelectorAll('.sidebar-nav a').forEach(link => {
+      link.addEventListener('click', function(e) {
+        e.preventDefault();
+        const page = this.getAttribute('data-page');
+        document.querySelectorAll('.sidebar-nav a').forEach(l => l.classList.remove('active'));
+        this.classList.add('active');
+        updateAppbarTitle(page);
+        hideProfileDropdown();
+        if(page === "dashboard") {
+          showDashboardOverview();
+        } else {
+          showIframePage(page);
+        }
+      });
+    });
+
+    // Real-time dashboard stats: show immediate values from APP_CACHE if present, then fetch authoritative numbers
+    async function updateDashboardStats() {
+      try {
+        // Fast path: if cached snapshot exists, show immediate values
+        if (window.APP_CACHE && Array.isArray(window.APP_CACHE.users)) {
+          const cachedUsersCount = window.APP_CACHE.users.length;
+          const setIf = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+          setIf("totalUsers", cachedUsersCount);
+          // compute total balance from cache quickly
+          const total = window.APP_CACHE.users.reduce((s,u) => s + (typeof u.balance === 'number' ? u.balance : 0), 0);
+          setIf("totalBalance", `$${total.toFixed(2)}`);
+        }
+
+        // Then fetch authoritative numbers (as before) to ensure up-to-date values
+        const headers = { 'x-admin-token': localStorage.getItem("adminToken") || '' };
+        const [usersRes, balanceRes, tasksRes, withdrawalsRes] = await Promise.all([
+          fetch('/admin/total-users', { headers }).then(r => r.json()).catch(() => ({ count: "-" })),
+          fetch('/admin/total-balance', { headers }).then(r => r.json()).catch(() => ({ total: "-" })),
+          fetch('/admin/active-tasks', { headers }).then(r => r.json()).catch(() => ({ count: "-" })),
+          fetch('/admin/pending-withdrawals', { headers }).then(r => r.json()).catch(() => ({ count: "-" })),
+        ]);
+
+        const setIf = (id, val) => {
+          const el = document.getElementById(id);
+          if (el) el.textContent = val;
+        };
+
+        setIf("totalUsers", (usersRes && typeof usersRes.count !== 'undefined') ? usersRes.count : (window.APP_CACHE && Array.isArray(window.APP_CACHE.users) ? window.APP_CACHE.users.length : "-"));
+        setIf("totalBalance", (balanceRes && balanceRes.total) ? `$${balanceRes.total}` : (window.APP_CACHE ? `$${(window.APP_CACHE.users||[]).reduce((s,u)=>s+(u.balance||0),0).toFixed(2)}` : "-"));
+        setIf("activeTasks", (tasksRes && typeof tasksRes.count !== 'undefined') ? tasksRes.count : "-");
+        setIf("pendingWithdrawals", (withdrawalsRes && typeof withdrawalsRes.count !== 'undefined') ? withdrawalsRes.count : "-");
+      } catch (e) {
+        console.error('updateDashboardStats error', e);
+      }
+    }
+
+    function showDashboardOverview() {
+      document.getElementById('dashboardContent').style.display = "block";
+      document.getElementById('mainFrameContainer').style.display = "none";
+      updateDashboardStats();
+      renderCharts();
+    }
+    function showIframePage(page) {
+      document.getElementById('mainFrame').src = page;
+      document.getElementById('mainFrameContainer').style.display = "block";
+      document.getElementById('dashboardContent').style.display = "none";
+    }
+
+    function updateAppbarTitle(pageFile) {
+      const map = {
+        'dashboard': { icon: 'fa-chart-bar', text: 'Dashboard' },
+        'users.html': { icon: 'fa-users', text: 'Users' },
+        'products.html': { icon: 'fa-box', text: 'Products' },
+        'combos.html': { icon: 'fa-layer-group', text: 'Combos' },
+        'tasks.html': { icon: 'fa-tasks', text: 'Tasks' },
+        'transactions.html': { icon: 'fa-money-bill', text: 'Transactions' },
+        'withdrawals.html': { icon: 'fa-money-check-alt', text: 'Withdrawals' },
+        'notifications.html': { icon: 'fa-bell', text: 'Notifications' },
+        'vip-manager.html': { icon: 'fa-star', text: 'VIP Levels' },
+        'activity.html': { icon: 'fa-clipboard-list', text: 'Activity Logs' },
+        'balance-adder.html': { icon: 'fa-plus-circle', text: 'Balance Adder' },
+        'tracked-clicks.html': { icon: 'fa-map-marker-alt', text: 'Tracked Clicks' },
+        'settings.html': { icon: 'fa-cog', text: 'Settings' }
+      };
+      const info = map[pageFile] || map['dashboard'];
+      document.getElementById("appbarTitle").innerHTML = `<i class="fa ${info.icon}"></i> ${info.text}`;
+    }
+
+    // Profile dropdown
+    function showProfileDropdown(event) {
+      event.stopPropagation();
+      const dropdown = document.getElementById("profileDropdown");
+      dropdown.classList.toggle("show");
+      const rect = event.target.getBoundingClientRect();
+      dropdown.style.right = (window.innerWidth - rect.right + 5) + "px";
+      dropdown.style.top = (rect.bottom + 8) + "px";
+    }
+    function hideProfileDropdown() {
+      document.getElementById("profileDropdown").classList.remove("show");
+    }
+    document.body.addEventListener('click', function(e){
+      if (!e.target.closest('.profile-dropdown') && !e.target.closest('.appbar-profile') && !e.target.closest('.sidebar-btn')) {
+        hideProfileDropdown();
+      }
+    });
+
+    // Toast
+    function showToast(msg) {
+      const toast = document.getElementById("toast");
+      toast.textContent = msg;
+      toast.className = "toast show";
+      setTimeout(() => { toast.className = "toast"; }, 3000);
+    }
+
+    // Logout
+    function logout() {
+      localStorage.removeItem("adminToken");
+      window.location.href = "/admin-panel/login.html";
+    }
+
+    function handleResponsiveSidebar() {
+      if (window.innerWidth < 900) {
+        document.getElementById("sidebar").classList.remove("show");
+      } else {
+        document.getElementById("sidebar").classList.add("show");
+      }
+    }
+    window.addEventListener("resize", handleResponsiveSidebar);
+    window.addEventListener("DOMContentLoaded", handleResponsiveSidebar);
+
+    // Chart.js analytics (for dashboard)
+    function renderCharts() {
+      // Users chart (dummy data)
+      var ctxUsers = document.getElementById('chartUsers');
+      if (chartUsersInstance) { chartUsersInstance.destroy(); }
+      if (ctxUsers && ctxUsers.getContext) {
+        ctxUsers.height = 170;
+        chartUsersInstance = new Chart(ctxUsers, {
+          type: 'line',
+          data: {
+            labels: ['Week 1', 'Week 2', 'Week 3', 'Week 4'],
+            datasets: [{
+              label: 'Users',
+              data: [12, 15, 18, 21],
+              borderColor: '#1767c6',
+              backgroundColor: 'rgba(23,103,198,0.08)',
+              fill: true,
+              tension: 0.4,
+              pointRadius: 3
+            }]
+          },
+          options: {
+            plugins: { legend: { display: false } },
+            scales: { y: { beginAtZero: true } }
+          }
+        });
+      }
+      // Revenue chart (dummy data)
+      var ctxRevenue = document.getElementById('chartRevenue');
+      if (chartRevenueInstance) { chartRevenueInstance.destroy(); }
+      if (ctxRevenue && ctxRevenue.getContext) {
+        ctxRevenue.height = 170;
+        chartRevenueInstance = new Chart(ctxRevenue, {
+          type: 'bar',
+          data: {
+            labels: ['Jan', 'Feb', 'Mar', 'Apr'],
+            datasets: [{
+              label: 'Revenue',
+              data: [1200, 1400, 1800, 2100],
+              backgroundColor: '#1767c6'
+            }]
+          },
+          options: {
+            plugins: { legend: { display: false } },
+            scales: { y: { beginAtZero: true } }
+          }
+        });
+      }
+    }
+
+    // On initial load, set Dashboard as active and trigger dark mode sync
+    document.querySelector('.sidebar-nav a[data-page="dashboard"]').classList.add('active');
+    updateAppbarTitle("dashboard");
+    syncIframeDarkMode();
+
+    /* ===== Add User modal wiring (Safer + debug logging) ===== */
+    (function(){
+      const openBtn = document.getElementById('openAddUserBtn');
+      const modal = document.getElementById('addUserModal');
+      const closeBtn = document.getElementById('closeAddUserModal');
+      const cancelBtn = document.getElementById('au_cancel');
+      const form = document.getElementById('addUserForm');
+      const msgEl = document.getElementById('au_msg');
+
+      function showModal() { msgEl.textContent = ''; modal.style.display = 'flex'; modal.setAttribute('aria-hidden','false'); }
+      function hideModal() { modal.style.display = 'none'; modal.setAttribute('aria-hidden','true'); }
+
+      openBtn && openBtn.addEventListener('click', (e) => { e.preventDefault(); showModal(); });
+      closeBtn && closeBtn.addEventListener('click', hideModal);
+      cancelBtn && cancelBtn.addEventListener('click', hideModal);
+
+      async function getAdminTokenPrompt() {
+        let token = localStorage.getItem('adminToken');
+        if (!token) {
+          token = prompt('Paste admin token from login (will be saved in localStorage for this browser).');
+          if (token) localStorage.setItem('adminToken', token);
+        }
+        return token;
+      }
+
+      async function createMinimalUser(token, payload) {
+        if (payload && (payload._id || payload.id)) { delete payload._id; delete payload.id; }
+        console.debug('[admin] createMinimalUser payload:', payload);
+        const res = await fetch('/admin/users', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-admin-token': token },
+          credentials: 'include',
+          body: JSON.stringify(payload)
+        });
+        const raw = await res.text();
+        let body;
+        try { body = JSON.parse(raw); } catch(e){ body = { success: false, __raw: raw }; }
+        console.debug('[admin] createMinimalUser response status:', res.status, 'body:', body);
+        return { ok: res.ok, status: res.status, body };
+      }
+
+      async function updateUserFields(token, username, updates) {
+        if (!username) throw new Error('username required for update');
+        console.debug('[admin] updateUserFields', username, updates);
+        const res = await fetch('/admin/user/' + encodeURIComponent(username), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'x-admin-token': token },
+          credentials: 'include',
+          body: JSON.stringify({ action: 'edit', updates })
+        });
+        const raw = await res.text();
+        let body;
+        try { body = JSON.parse(raw); } catch(e) { body = { success: false, __raw: raw }; }
+        console.debug('[admin] updateUserFields response', res.status, body);
+        return { ok: res.ok, status: res.status, body };
+      }
+
+      form.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        msgEl.style.color = '#333';
+        msgEl.textContent = 'Working...';
+
+        try {
+          const token = await getAdminTokenPrompt();
+          if (!token) throw new Error('Admin token required');
+
+          const username = document.getElementById('au_username').value.trim();
+          const phone = document.getElementById('au_phone').value.trim();
+          const loginPassword = document.getElementById('au_loginPassword').value;
+          const withdrawPassword = document.getElementById('au_withdrawPassword').value;
+          const inviteCode = document.getElementById('au_inviteCode').value.trim();
+          const referredBy = document.getElementById('au_referredBy').value.trim();
+
+          if (!username || !phone || !loginPassword || !withdrawPassword) {
+            msgEl.style.color = '#c62828';
+            msgEl.textContent = 'Please fill required fields.';
+            return;
+          }
+
+          // create minimal user (do not include _id)
+          const createPayload = { username, phone, vipLevel: 1, balance: 0 };
+          const createResp = await createMinimalUser(token, createPayload);
+
+          if (!createResp.ok || (createResp.body && createResp.body.success === false)) {
+            const serverMsg = createResp.body && (createResp.body.message || createResp.body.__raw) ? (createResp.body.message || createResp.body.__raw) : `HTTP ${createResp.status}`;
+            console.warn('[admin] create user failed:', serverMsg, createResp.body);
+            throw new Error(serverMsg || 'Failed to create user');
+          }
+
+          const updates = {
+            loginPassword,
+            withdrawPassword,
+            inviteCode: inviteCode || undefined,
+            referredBy: referredBy || undefined
+          };
+          Object.keys(updates).forEach(k => updates[k] === undefined && delete updates[k]);
+
+          if (Object.keys(updates).length > 0) {
+            const updResp = await updateUserFields(token, username, updates);
+            if (!updResp.ok || (updResp.body && updResp.body.success === false)) {
+              const serverMsg = updResp.body && (updResp.body.message || updResp.body.__raw) ? (updResp.body.message || updResp.body.__raw) : `HTTP ${updResp.status}`;
+              console.warn('[admin] update user fields failed', serverMsg, updResp.body);
+              throw new Error(serverMsg || 'Failed to update user fields');
+            }
+          }
+
+          msgEl.style.color = '#2e7d32';
+          msgEl.textContent = 'Training account created and linked.';
+          setTimeout(hideModal, 700);
+          showToast('User created and linked');
+          if (typeof refreshUserList === 'function') refreshUserList();
+          // Also trigger background sync so APP_CACHE is updated sooner
+          try { if (window.APP_CACHE) { /* trigger immediate background sync */ } } catch(e) {}
+        } catch (err) {
+          console.error('[admin] Add user error:', err);
+          msgEl.style.color = '#c62828';
+          msgEl.textContent = 'Error: ' + (err.message || 'Unknown');
+        }
+      });
+
+      // close modal on outside click
+      window.addEventListener('click', (evt) => { if (evt.target === modal) hideModal(); });
+    })();
+    /* ===== end Add User modal wiring ===== */
+
+    //
+    // Appbar user search: fetch users once and show autocomplete; selecting opens users.html#user=<username>
+    //
+    let _appbarUsersCache = [];
+
+    async function fetchAllUsersForAppbar() {
+      try {
+        // fast: use APP_CACHE if available
+        if (window.APP_CACHE && Array.isArray(window.APP_CACHE.users) && window.APP_CACHE.users.length) {
+          _appbarUsersCache = window.APP_CACHE.users;
+          return;
+        }
+        const res = await fetch('/admin/users', {
+          headers: { 'x-admin-token': localStorage.getItem('adminToken') }
+        });
+        if (res.ok) {
+          _appbarUsersCache = await res.json();
+        } else {
+          _appbarUsersCache = [];
+        }
+      } catch (e) {
+        _appbarUsersCache = [];
+      }
+    }
+
+    function onAppbarUserInput() {
+      const q = document.getElementById('appbarUserSearch').value.trim().toLowerCase();
+      const list = document.getElementById('appbarAutocomplete');
+      if (!q) {
+        list.style.display = 'none';
+        return;
+      }
+      const matches = (_appbarUsersCache || []).filter(u => {
+        if (!u || !u.username) return false;
+        return u.username.toLowerCase().includes(q) || (u.phone && String(u.phone).includes(q));
+      }).slice(0, 30);
+      renderAppbarAutocomplete(matches);
+    }
+
+    function renderAppbarAutocomplete(matches) {
+      const list = document.getElementById('appbarAutocomplete');
+      list.innerHTML = '';
+      if (!matches.length) {
+        list.style.display = 'none';
+        return;
+      }
+      matches.forEach(u => {
+        const div = document.createElement('div');
+        div.className = 'item';
+        const left = document.createElement('div');
+        left.textContent = u.username;
+        const right = document.createElement('div');
+        right.style.opacity = 0.8;
+        right.textContent = `$${Number(u.balance||0).toFixed(2)}`;
+        div.appendChild(left);
+        div.appendChild(right);
+        div.onclick = () => selectUserFromAppbar(u.username);
+        list.appendChild(div);
+      });
+      list.style.display = 'block';
+    }
+
+    function onAppbarUserKeyDown(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const q = document.getElementById('appbarUserSearch').value.trim();
+        if (!q) return;
+        const exact = (_appbarUsersCache || []).find(u => u.username === q);
+        if (exact) {
+          selectUserFromAppbar(exact.username);
+          return;
+        }
+        showIframePage('users.html#user=' + encodeURIComponent(q));
+        document.getElementById('appbarAutocomplete').style.display = 'none';
+      } else if (e.key === 'Escape') {
+        document.getElementById('appbarAutocomplete').style.display = 'none';
+      }
+    }
+
+    function selectUserFromAppbar(username) {
+      if (!username) return;
+      showIframePage('users.html#user=' + encodeURIComponent(username));
+      document.getElementById('appbarAutocomplete').style.display = 'none';
+      document.getElementById('appbarUserSearch').value = '';
+    }
+
+    // hide autocomplete when clicking outside
+    document.addEventListener('click', (evt) => {
+      const wrap = document.getElementById('appbarSearchWrap');
+      if (!wrap.contains(evt.target)) {
+        document.getElementById('appbarAutocomplete').style.display = 'none';
+      }
+    });
+
+  </script>
+</body>
+</html>

@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Admin - Balance Adder</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    .autocomplete-list {
+      border: 1px solid #ccc;
+      max-height: 150px;
+      overflow-y: auto;
+      background: white;
+      position: absolute;
+      z-index: 10;
+      width: 90%;
+      left: 5%;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    .autocomplete-list div {
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    .autocomplete-list div:hover {
+      background: #f0f0f0;
+    }
+    .balance-display {
+      font-weight: bold;
+      margin-bottom: 10px;
+      color: #007b00;
+    }
+
+    /* History table styles */
+    .history-section {
+      margin-top: 24px;
+      background: #fff;
+      padding: 16px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }
+    .history-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .history-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    .history-table th, .history-table td {
+      padding: 8px 10px;
+      border-bottom: 1px solid #eee;
+      text-align: left;
+    }
+    .history-table th {
+      background: #fafafa;
+      font-weight: 600;
+    }
+    .history-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .small-muted {
+      color: #666;
+      font-size: 13px;
+    }
+    .history-empty {
+      padding: 12px;
+      color: #555;
+    }
+    .export-history-btn {
+      background: #007bff;
+      color: white;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    @media (max-width: 700px) {
+      .autocomplete-list { width: 92%; left: 4%; }
+    }
+    .loading-indicator { display:inline-block; margin-left:8px; font-size:13px; color:#64748b; }
+    .hidden { display:none !important; }
+  </style>
+</head>
+<body>
+  <script>
+    // Redirect to login if token missing
+    const token = localStorage.getItem("adminToken");
+    if (!token) {
+      alert("Access denied. Please login.");
+      window.location.href = "/admin-panel/login.html";
+    }
+  </script>
+
+  <div class="main-content" id="mainContent">
+    <main class="dashboard-container">
+      <section class="admin-section">
+        <div class="section-header">
+          <h2>Add Balance to User</h2>
+        </div>
+        <form id="addBalanceForm" class="admin-form" autocomplete="off" style="position:relative;">
+          <label for="username">Username</label>
+          <input type="text" id="username" placeholder="Enter username..." required autocomplete="off" oninput="onUserInput()" />
+          <div id="autocomplete" class="autocomplete-list" style="display:none;"></div>
+
+          <div id="balanceDisplay" class="balance-display"></div>
+
+          <label for="amount">Amount</label>
+          <input type="number" id="amount" placeholder="Enter amount..." min="0.01" step="0.01" required />
+
+          <button type="submit" class="add-btn"><i class="fa fa-plus"></i> Add Balance</button>
+        </form>
+        <div id="lastAction" style="margin-top:1rem;"></div>
+
+        <!-- NEW: Admin Add Balance History -->
+        <div id="adminHistorySection" class="history-section" aria-live="polite">
+          <div class="history-header">
+            <div>
+              <h3 style="margin:0;">Admin Add Balance History</h3>
+              <div class="small-muted">Showing latest admin_add_balance transactions</div>
+            </div>
+            <div class="history-actions">
+              <input id="historySearch" type="text" placeholder="Search username or reference..." oninput="filterAdminHistory()" />
+              <button class="export-history-btn" onclick="exportAdminHistoryCSV()"><i class="fa fa-download"></i> Export CSV</button>
+            </div>
+          </div>
+
+          <div style="overflow:auto;">
+            <table class="history-table" id="adminHistoryTable" role="table" aria-label="Admin add balance history">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>User</th>
+                  <th>Amount</th>
+                  <th>Reference</th>
+                  <th>Status</th>
+                  <th>Date</th>
+                </tr>
+              </thead>
+              <tbody id="adminHistoryBody">
+                <tr><td colspan="6" class="history-empty">Loading history...</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div id="historyFooter" style="margin-top:8px;" class="small-muted"></div>
+          <div style="margin-top:8px;">
+            <button id="loadMoreHistoryBtn" class="export-history-btn" style="display:none;" onclick="loadMoreHistory()">Load more</button>
+            <span id="historyLoadingIndicator" class="loading-indicator hidden">Loading…</span>
+          </div>
+        </div>
+        <!-- END History section -->
+
+      </section>
+    </main>
+  </div>
+
+  <!-- Toast Notification -->
+  <div id="toast" class="toast"></div>
+
+  <script>
+    let allUsersCache = [];
+    let selectedUser = null;
+
+    // ADMIN HISTORY DATA (paginated)
+    let adminHistory = [];       // flattened loaded pages of admin_add_balance txns
+    let filteredAdminHistory = []; // filtered view for search
+    let historyPage = 1;
+    const historyPerPage = 100;
+    let historyTotal = 0;
+    let historyLoading = false;
+
+    function setHistoryLoading(on) {
+      historyLoading = !!on;
+      const ind = document.getElementById('historyLoadingIndicator');
+      if (ind) ind.className = on ? 'loading-indicator' : 'loading-indicator hidden';
+      const btn = document.getElementById('loadMoreHistoryBtn');
+      if (btn) btn.disabled = !!on;
+    }
+
+    // Fetch all users for autocomplete (keeps legacy behavior)
+    async function fetchAllUsers() {
+      try {
+        const res = await fetch("/admin/users?page=1&limit=1000", {
+          headers: { "x-admin-token": localStorage.getItem("adminToken") }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          // server returns { users, page, total } in newer admin; handle both shapes
+          if (data && Array.isArray(data.users)) allUsersCache = data.users;
+          else if (Array.isArray(data)) allUsersCache = data;
+        }
+      } catch {}
+    }
+
+    fetchAllUsers();
+
+    function onUserInput() {
+      const input = document.getElementById("username");
+      const query = input.value.trim().toLowerCase();
+      selectedUser = null;
+      document.getElementById('balanceDisplay').textContent = "";
+      if (!query) {
+        document.getElementById("autocomplete").style.display = "none";
+        return;
+      }
+      const matches = allUsersCache.filter(u => u.username && u.username.toLowerCase().includes(query));
+      showAutocomplete(matches, input);
+    }
+
+    function showAutocomplete(matches, input) {
+      const list = document.getElementById("autocomplete");
+      list.innerHTML = "";
+      if (matches.length === 0) {
+        list.style.display = "none";
+        return;
+      }
+      matches.slice(0, 8).forEach(u => {
+        const div = document.createElement("div");
+        div.textContent = `${u.username} (Balance: $${Number(u.balance || 0).toFixed(2)})`;
+        div.onclick = () => {
+          input.value = u.username;
+          selectUser(u.username);
+          list.style.display = "none";
+        };
+        list.appendChild(div);
+      });
+      list.style.display = "block";
+    }
+
+    async function selectUser(username) {
+      try {
+        const res = await fetch(`/admin/users/${encodeURIComponent(username)}`, {
+          headers: { "x-admin-token": localStorage.getItem("adminToken") }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          selectedUser = data.user;
+          document.getElementById('balanceDisplay').textContent =
+            `Current Balance: $${Number(selectedUser.balance || 0).toFixed(2)}`;
+        } else {
+          selectedUser = null;
+          document.getElementById('balanceDisplay').textContent = "User not found.";
+        }
+      } catch {
+        selectedUser = null;
+        document.getElementById('balanceDisplay').textContent = "Error fetching user.";
+      }
+    }
+
+    document.getElementById("addBalanceForm").onsubmit = async function(e) {
+      e.preventDefault();
+      const username = document.getElementById("username").value.trim();
+      const amount = parseFloat(document.getElementById("amount").value);
+      if (!username || isNaN(amount) || amount <= 0) {
+        showToast("Please enter a valid username and positive amount.");
+        return;
+      }
+      try {
+        const res = await fetch("/admin/add-balance", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-admin-token": localStorage.getItem("adminToken")
+          },
+          body: JSON.stringify({ username, amount })
+        });
+        if (res.ok) {
+          showToast("Balance added successfully!");
+          document.getElementById("lastAction").innerHTML =
+            `<span style="color:green;">Added $${amount.toFixed(2)} to <b>${username}</b></span> at ${new Date().toLocaleString()}`;
+          document.getElementById("addBalanceForm").reset();
+          document.getElementById("balanceDisplay").textContent = "";
+          fetchAllUsers();
+          // Refresh history (load first page again)
+          adminHistory = [];
+          historyPage = 1;
+          fetchAdminAddHistory(1, false);
+        } else {
+          const data = await res.json().catch(()=>({}));
+          showToast("Error: " + (data.message || "Failed to add balance."));
+        }
+      } catch (err) {
+        showToast("Network error. Try again.");
+      }
+    };
+
+    document.addEventListener('click', function(event) {
+      if (!event.target.closest('#autocomplete') && event.target.id !== 'username') {
+        document.getElementById('autocomplete').style.display = 'none';
+      }
+    });
+
+    function showToast(msg) {
+      const toast = document.getElementById("toast");
+      toast.textContent = msg;
+      toast.className = "toast show";
+      setTimeout(() => { toast.className = "toast"; }, 3000);
+    }
+
+    // ---------------------------
+    // Admin Add Balance History (paginated)
+    // ---------------------------
+
+    async function fetchAdminAddHistory(page = 1, append = false) {
+      setHistoryLoading(true);
+      const bodyEl = document.getElementById('adminHistoryBody');
+      if (!append) bodyEl.innerHTML = '<tr><td colspan="6" class="history-empty">Loading history...</td></tr>';
+      document.getElementById('historyFooter').textContent = '';
+
+      try {
+        // Use server-side filtered endpoint for type=admin_add_balance
+        const res = await fetch(`/admin/transactions?type=admin_add_balance&page=${page}&limit=${historyPerPage}`, {
+          headers: { 'x-admin-token': localStorage.getItem('adminToken') }
+        });
+
+        if (res.status === 401 || res.status === 403) {
+          bodyEl.innerHTML = '<tr><td colspan="6" class="history-empty">Unauthorized or failed to fetch history.</td></tr>';
+          alert("Session expired or unauthorized. Please login again.");
+          logout();
+          return;
+        }
+
+        if (!res.ok) {
+          // fallback to legacy /admin/transactions
+          const res2 = await fetch('/admin/transactions', { headers: { 'x-admin-token': localStorage.getItem('adminToken') } });
+          if (!res2.ok) {
+            bodyEl.innerHTML = '<tr><td colspan="6" class="history-empty">Unauthorized or failed to fetch history.</td></tr>';
+            return;
+          }
+          const legacy = await res2.json();
+          let deposits = [];
+          let withdrawals = [];
+          if (Array.isArray(legacy)) deposits = legacy;
+          else {
+            deposits = Array.isArray(legacy.deposits) ? legacy.deposits : [];
+            withdrawals = Array.isArray(legacy.withdrawals) ? legacy.withdrawals : [];
+          }
+          let merged = deposits.concat(withdrawals);
+          merged = merged.map(item => ({
+            raw: item,
+            id: item.id || item._id || item.transactionId || "",
+            type: (item.type || "").toString(),
+            user: item.username || item.user || "",
+            amount: item.amount !== undefined ? Number(item.amount) : (item.value !== undefined ? Number(item.value) : 0),
+            status: item.status || "Completed",
+            createdAt: item.createdAt || item.date || item.createdAt,
+            reference: item.reference || item.ref || item.txRef || ""
+          }));
+          const matches = merged.filter(it => {
+            const t = (it.type || "").toString().toLowerCase();
+            if (t.includes('admin_add_balance') || t.includes('admin add balance') || t === 'adminaddbalance') return true;
+            if ((it.raw && it.raw.type && it.raw.type.toString().toLowerCase().includes('admin_add_balance'))) return true;
+            return false;
+          });
+          matches.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+          if (append) adminHistory = adminHistory.concat(matches);
+          else adminHistory = matches;
+          filteredAdminHistory = adminHistory.slice();
+          renderAdminHistory(filteredAdminHistory);
+          setHistoryLoading(false);
+          document.getElementById('loadMoreHistoryBtn').style.display = 'none';
+          return;
+        }
+
+        // res.ok
+        const data = await res.json().catch(()=>null);
+        let items = [];
+        let total = 0;
+        if (data) {
+          if (Array.isArray(data.items)) {
+            items = data.items;
+            total = typeof data.total === 'number' ? data.total : items.length;
+          } else if (Array.isArray(data)) {
+            items = data;
+            total = data.length;
+          } else if (Array.isArray(data.deposits) || Array.isArray(data.withdrawals)) {
+            const deposits = Array.isArray(data.deposits) ? data.deposits : [];
+            items = deposits; // only looking for deposits (admin adds)
+            total = items.length;
+          }
+        }
+
+        // Normalize items (map to our rendering shape)
+        const normalized = (items || []).map(item => ({
+          raw: item,
+          id: item.id || item._id || item.transactionId || "",
+          type: (item.type || "").toString(),
+          user: item.username || item.user || "",
+          amount: item.amount !== undefined ? Number(item.amount) : (item.value !== undefined ? Number(item.value) : 0),
+          status: item.status || "Completed",
+          createdAt: item.createdAt || item.date || item.createdAt,
+          reference: item.reference || item.ref || item.txRef || ""
+        }));
+
+        normalized.sort((a,b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+
+        if (append) adminHistory = adminHistory.concat(normalized);
+        else adminHistory = normalized;
+
+        historyPage = page;
+        historyTotal = total || adminHistory.length;
+
+        filteredAdminHistory = adminHistory.slice();
+        renderAdminHistory(filteredAdminHistory);
+
+        const loadMoreBtn = document.getElementById('loadMoreHistoryBtn');
+        if (loadMoreBtn) {
+          if (adminHistory.length < (historyTotal || 0)) loadMoreBtn.style.display = 'inline-block';
+          else loadMoreBtn.style.display = 'none';
+        }
+
+      } catch (err) {
+        console.error('fetchAdminAddHistory error', err);
+        bodyEl.innerHTML = '<tr><td colspan="6" class="history-empty">Failed to load history.</td></tr>';
+      } finally {
+        setHistoryLoading(false);
+      }
+    }
+
+    function renderAdminHistory(list) {
+      const bodyEl = document.getElementById('adminHistoryBody');
+      const footer = document.getElementById('historyFooter');
+      if (!list || !list.length) {
+        bodyEl.innerHTML = '<tr><td colspan="6" class="history-empty">No admin_add_balance transactions found.</td></tr>';
+        footer.textContent = '';
+        return;
+      }
+      const limited = list.slice(0, 200);
+      bodyEl.innerHTML = '';
+      limited.forEach(txn => {
+        const dateStr = txn.createdAt ? new Date(txn.createdAt).toLocaleString() : '';
+        const ref = txn.reference || (txn.raw && (txn.raw.reference || txn.raw.ref || txn.raw.txRef)) || '';
+        bodyEl.innerHTML += `
+          <tr>
+            <td style="max-width:220px;word-break:break-all;">${escapeHtml(txn.id)}</td>
+            <td>${escapeHtml(txn.user)}</td>
+            <td>$${(txn.amount || 0).toFixed(2)}</td>
+            <td>${escapeHtml(ref)}</td>
+            <td>${escapeHtml(txn.status)}</td>
+            <td>${escapeHtml(dateStr)}</td>
+          </tr>
+        `;
+      });
+      footer.textContent = `Showing ${Math.min(limited.length, list.length)} of ${list.length} admin_add_balance transactions (most recent first)`;
+    }
+
+    function filterAdminHistory() {
+      const q = (document.getElementById('historySearch').value || '').trim().toLowerCase();
+      if (!q) filteredAdminHistory = adminHistory.slice();
+      else {
+        filteredAdminHistory = adminHistory.filter(txn =>
+          (txn.user && txn.user.toString().toLowerCase().includes(q)) ||
+          (txn.reference && txn.reference.toString().toLowerCase().includes(q)) ||
+          (txn.id && txn.id.toString().toLowerCase().includes(q))
+        );
+      }
+      renderAdminHistory(filteredAdminHistory);
+    }
+
+    function loadMoreHistory() {
+      if (historyLoading) return;
+      fetchAdminAddHistory(historyPage + 1, true);
+    }
+
+    function exportAdminHistoryCSV() {
+      const rows = [
+        ["ID", "User", "Amount", "Reference", "Status", "Date"],
+        ...filteredAdminHistory.map(t => [
+          t.id, t.user, (t.amount || 0).toFixed(2), (t.reference || ''), (t.status || ''), (t.createdAt ? new Date(t.createdAt).toLocaleString() : '')
+        ])
+      ];
+      const csv = rows.map(r => r.map(String).map(s=>`"${s.replace(/"/g,'""')}"`).join(",")).join("\n");
+      const blob = new Blob([csv], { type: "text/csv" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `admin_add_balance_history_${new Date().toISOString().slice(0,10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast("History exported to CSV");
+    }
+
+    function escapeHtml(str) {
+      if (str === null || typeof str === 'undefined') return '';
+      return String(str)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    // Load first page on page load
+    fetchAdminAddHistory(1, false);
+
+    // Expose fetchAdminAddHistory globally (useful for debugging)
+    window.fetchAdminAddHistory = fetchAdminAddHistory;
+
+  </script>
+<script>
+window.addEventListener("message", function(event) {
+  if (event.data && event.data.type === "setDarkMode") {
+    if (event.data.enable) {
+      document.body.classList.add("dark");
+      document.documentElement.classList.add("dark");
+    } else {
+      document.body.classList.remove("dark");
+      document.documentElement.classList.remove("dark");
+    }
+  }
+});
+// On load, also check localStorage (for direct navigation)
+if (localStorage.getItem("adminDarkMode") === "true") {
+  document.body.classList.add("dark");
+  document.documentElement.classList.add("dark");
+}
+</script>
+</body>
+</html>
