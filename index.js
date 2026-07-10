@@ -68,10 +68,10 @@ app.get("/health", require("./src/health"));
 app.use(
   cors({
     origin: [
-      "https://stackswork.netlify.app",
+      "https://lumostras.com",
       "https://stacksl.com",
       "https://www.stacksl.com",
-      "https://stacksapp.pages.dev",
+      "https://www.lumostras.com/login",
       "http://localhost:5173",
       "https://stacks-48in.onrender.com",
       "https://lumostra.onrender.com",
