@@ -284,7 +284,7 @@ setInterval(() => {
 }, CLOUDINARY_CACHE_DURATION);
 
 // ========== Utility & config ==========
-const MIN_STARTING_CAPITAL_PERCENT = 0.30; // 30%
+const MIN_STARTING_CAPITAL_PERCENT = 0.50; // 50%
 
 function generateInviteCode() {
     const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -1448,7 +1448,7 @@ router.post('/change-password', verifyUserToken, async (req, res) => {
         return res.status(400).json({ success: false, message: 'Old password is incorrect.' });
     }
     if (!newPassword || typeof newPassword !== 'string' || newPassword.trim().length < 4) {
-        return res.status(400).json({ success: false, message: 'New password must be at least 4 characters.' });
+        return res.status(400).json({ success: false, message: 'New password must be at least 4 characters.' }); 
     }
 
     user.loginPassword = newPassword;
