@@ -795,7 +795,7 @@ router.get('/task-records', verifyUserToken, async (req, res) => {
     res.json({ success: true, records });
 });
 
-// Start task (with 30% starting-capital enforcement)
+// Start task (with 50% starting-capital enforcement)
 // Middleware checkPlatformStatus applied here to block when platformClosed.
 router.post('/start-task', verifyUserToken, checkPlatformStatus, async (req, res) => {
     try {
@@ -859,8 +859,10 @@ router.post('/start-task', verifyUserToken, checkPlatformStatus, async (req, res
         }
         setStartingBalance = Number(setStartingBalance || user.balance || 0);
 
-        // compute minimum allowed price (30% of setStartingBalance)
-        const minAllowedPrice = Math.round((setStartingBalance * MIN_STARTING_CAPITAL_PERCENT + Number.EPSILON) * 100) / 100;
+        // compute minimum allowed price (50% of the user's current balance to keep the threshold in sync with accumulating capital)
+        // Use the live user.balance so the minimum moves up automatically as balance grows.
+        const baseForMin = Number(user.balance ?? setStartingBalance ?? 0);
+        const minAllowedPrice = Math.round((baseForMin * MIN_STARTING_CAPITAL_PERCENT + Number.EPSILON) * 100) / 100;
 
         // fetch products (fast cached getter)
         const products = await getCachedCloudinaryProducts();
@@ -874,7 +876,7 @@ router.post('/start-task', verifyUserToken, checkPlatformStatus, async (req, res
         }
 
         if (!affordable.length) {
-            return res.status(400).json({ success: false, message: `No products available matching the starting-capital rule. Minimum product price must be at least ${minAllowedPrice.toFixed(2)} GBP (30% of your set starting capital).` });
+            return res.status(400).json({ success: false, message: `No products available matching the starting-capital rule. Minimum product price must be at least ${minAllowedPrice.toFixed(2)} GBP (50% of your current capital).` });
         }
 
         const chosenProduct = affordable[Math.floor(Math.random() * affordable.length)];
@@ -1448,7 +1450,7 @@ router.post('/change-password', verifyUserToken, async (req, res) => {
         return res.status(400).json({ success: false, message: 'Old password is incorrect.' });
     }
     if (!newPassword || typeof newPassword !== 'string' || newPassword.trim().length < 4) {
-        return res.status(400).json({ success: false, message: 'New password must be at least 4 characters.' }); 
+        return res.status(400).json({ success: false, message: 'New password must be at least 4 characters.' });
     }
 
     user.loginPassword = newPassword;
