@@ -74,7 +74,7 @@ app.use(
       "https://www.lumostras.com/login",
       "http://localhost:5173",
       "https://stacks-48in.onrender.com",
-      "https://lumostra.onrender.com",
+      "https://lumostras.onrender.com",
     ],
     credentials: true,
     allowedHeaders: [
