@@ -1363,6 +1363,14 @@ router.post('/withdraw', verifyUserToken, checkPlatformStatus, async (req, res) 
         return res.json({ success: false, message: "Incorrect withdrawal password." });
     }
 
+    // Block suspended/frozen users from withdrawing
+    if (user.suspended === true || String(user.status || "").toLowerCase() === "suspended") {
+        return res.json({
+            success: false,
+            message: "Your account is currently frozen. Withdrawals are not permitted. Please contact Customer Support."
+        });
+    }
+
     // Enforce credit score requirement server-side (must be 100 to withdraw)
     const currentCredit = Number(user.creditScore ?? user.credit_score ?? 100);
     if (currentCredit < 100) {
@@ -1433,6 +1441,15 @@ router.post('/verify-withdraw-password', verifyUserToken, async (req, res) => {
     if (!actualWithdrawPwd) {
         return res.json({ success: false, message: "No withdrawal password is set." });
     }
+
+    // Block suspended/frozen users before password verification success
+    if (user.suspended === true || String(user.status || "").toLowerCase() === "suspended") {
+        return res.json({
+            success: false,
+            message: "Your account is currently frozen. Withdrawals are not permitted. Please contact Customer Support."
+        });
+    }
+
     if (actualWithdrawPwd === password) {
         return res.json({ success: true });
     } else {
