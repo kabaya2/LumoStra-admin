@@ -338,11 +338,13 @@ router.put('/user/:username', asyncHandler(async (req, res) => {
 
         case 'suspend':
             user.status = "Suspended";
+            user.suspended = true;
             await user.save();
             return res.json({ success: true, status: user.status });
 
         case 'activate':
             user.status = "Active";
+            user.suspended = false;
             await user.save();
             return res.json({ success: true, status: user.status });
 
@@ -766,8 +768,9 @@ router.patch('/users/:username/suspend', asyncHandler(async (req, res) => {
     const user = await User.findOne({ username }).lean();
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
     const newStatus = user.status === "Suspended" ? "Active" : "Suspended";
-    await User.updateOne({ username }, { $set: { status: newStatus } });
-    res.json({ success: true, status: newStatus });
+    const isSuspended = newStatus === "Suspended";
+    await User.updateOne({ username }, { $set: { status: newStatus, suspended: isSuspended } });
+    res.json({ success: true, status: newStatus, suspended: isSuspended });
 }));
 router.delete('/users/:username', asyncHandler(async (req, res) => {
     const { username } = req.params;
